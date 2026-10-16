@@ -51,12 +51,45 @@ class BatchTests(unittest.TestCase):
         class Failing(Engines):
             failed=False
             def detect(self,*args):
-                if not self.failed:self.failed=True;raise RuntimeError('Broken OCR sample')
+                if not Failing.failed:Failing.failed=True;raise RuntimeError('Broken OCR sample')
                 return super().detect(*args)
         manager=self.BatchManager(PipelineManager(self.store,Failing))
         batch=self.wait(manager,manager.start({'project_ids':[p['project_id'] for p in self.projects]})['id'])
         self.assertEqual(batch['state'],'completed_with_errors')
         self.assertEqual([i['state'] for i in batch['items']],['failed','completed'])
+
+    def test_memory_failure_pauses_queue_and_releases_engines(self):
+        closed=threading.Event()
+        class Exhausted(Engines):
+            def detect(self,*args): raise RuntimeError('ONNXRuntime: bad allocation')
+            def close(self): closed.set()
+        pipeline=PipelineManager(self.store,Exhausted)
+        manager=self.BatchManager(pipeline)
+        batch=self.wait(manager,manager.start({'project_ids':[p['project_id'] for p in self.projects]})['id'])
+        self.assertEqual(batch['state'],'paused')
+        self.assertEqual([i['state'] for i in batch['items']],['failed','pending'])
+        self.assertEqual(batch['failure_kind'],'memory')
+        self.assertTrue(closed.is_set())
+        self.assertIsNone(pipeline.engines)
+        self.assertIsNone(pipeline.batch_owner)
+
+    def test_resume_refreshes_selected_model_snapshot(self):
+        from unittest.mock import patch
+        pipeline=PipelineManager(self.store)
+        manager=self.BatchManager(pipeline)
+        bid=str(uuid.uuid4())
+        batch={'id':bid,'state':'paused','models':{'translation':{'id':'old'}},'items':[{'state':'failed'}]}
+        manager.batches[bid]=batch
+        with patch('backend.ai.registry.selected_model',side_effect=lambda kind:{'id':'new-'+kind}),patch.object(manager,'_launch'):
+            manager.control(bid,'resume')
+        self.assertEqual(batch['models']['translation']['id'],'new-translation')
+
+    def test_active_batch_remains_visible_after_history_limit(self):
+        manager=self.BatchManager(PipelineManager(self.store,Engines))
+        for index in range(25):
+            bid=str(index);manager.batches[bid]={'id':bid,'state':'completed','created_at':f'{index:03}','items':[]}
+        manager.active='0';manager.batches['0']['state']='running'
+        self.assertIn('0',[b['id'] for b in manager.list()])
 
     def test_pause_resume_and_gpu_ownership(self):
         entered=threading.Event();release=threading.Event()

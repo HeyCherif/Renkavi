@@ -38,3 +38,14 @@
 @media(max-width:620px){.word-preview-dialog{width:99vw;height:95vh}.word-preview-header{padding:8px}.word-preview-header small{display:none}.word-preview-pages{padding:6px 0}}
 
 .brand-logo img{display:block;width:100%;height:100%;object-fit:contain;border-radius:9px}
+
+/* Queue monitoring remains independent of the selected project. */
+.queue-screen{max-width:none;margin-left:var(--sidebar);padding:32px clamp(18px,3vw,48px);width:calc(100% - var(--sidebar))}
+.queue-page-heading{display:flex;justify-content:space-between;align-items:center;gap:24px;margin-bottom:24px}
+.queue-page-heading h1{margin:6px 0 10px;font-size:30px;letter-spacing:-.8px}
+.queue-page-heading .eyebrow{font-size:10px;letter-spacing:1.4px;color:var(--muted);margin:0}
+.queue-history{padding:24px}.queue-history .section-heading{gap:20px}.queue-history select{max-width:420px}
+.queue-history .batch-items{max-height:none}.queue-history .queue-item{padding:18px 0}
+#queue-single{padding:20px 24px;margin-bottom:18px}#queue-single p{overflow-wrap:anywhere}
+#batch-used-models:empty{display:none}.queue-history progress{width:100%;margin-top:12px}
+@media(max-width:700px){.queue-page-heading,.queue-history .section-heading{align-items:flex-start;flex-direction:column}.queue-history{padding:18px}.queue-history select{width:100%;max-width:100%}}

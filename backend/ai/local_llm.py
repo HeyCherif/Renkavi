@@ -40,7 +40,7 @@ def loaded(config: dict) -> bool:
 
 
 def release_loaded(config: dict) -> bool:
-    """Release only an app-owned LM Studio alias after memory exhaustion."""
+    """Release only an app-owned LM Studio alias after an engine failure."""
     if not config.get('model','').startswith('renkavi-') or not config.get('lms_cli'):
         return False
     flags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0
@@ -155,12 +155,65 @@ def gemma_prompt(text: str, source: str, target: str, context: str = '', table: 
             '<end_of_turn>\n<start_of_turn>model\n')
 
 
+def _error_detail(raw: bytes, data: dict) -> str:
+    """Keep only the server's short diagnostic, never its request or traceback."""
+    try:
+        body = json.loads(raw)
+    except (ValueError, UnicodeError):
+        return ''
+    detail = body.get('error', body.get('message', '')) if isinstance(body, dict) else ''
+    if isinstance(detail, dict):
+        detail = detail.get('message', '')
+    if not isinstance(detail, str):
+        return ''
+    for key in ('prompt', 'input', 'system_prompt'):
+        value = data.get(key)
+        if isinstance(value, str) and value:
+            detail = detail.replace(value, '[texte masqué]')
+    detail = re.sub(r'(?i)Bearer\s+[^\s;,]+', 'Bearer [masqué]', detail)
+    detail = re.sub(r'(?i)(api[_-]?key|token|password|authorization)\s*[:=]\s*[^\s;,]+', r'\1=[masqué]', detail)
+    detail = re.sub(r'\bsk-[\w-]+', '[clé masquée]', detail)
+    detail = re.sub(r'https?://[^\s<>]+', '[adresse masquée]', detail)
+    return re.sub(r'[\x00-\x1f\x7f]', ' ', detail.splitlines()[0] if detail else '')[:500]
+
+
+def _request_json(config: dict, path: str, data: dict) -> dict:
+    request = urllib.request.Request(config['base_url'] + path, data=json.dumps(data).encode(),
+                                     headers={'Content-Type': 'application/json'})
+    try:
+        with urllib.request.urlopen(request, timeout=180) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as error:
+        try:
+            detail = _error_detail(error.read(8192), data)
+        except (OSError, ValueError):
+            detail = ''
+        finally:
+            error.close()
+        lowered = detail.lower()
+        if ('channel error' in lowered or ('engine protocol' in lowered and 'failed' in lowered)):
+            prefix = 'Moteur de traduction indisponible'
+            # The API may still advertise a dead engine. Release only our alias
+            # so an explicit resume can load it again; never retry this request.
+            try:
+                release_loaded(config)
+            except Exception:
+                # Recovery must not hide the original engine diagnostic.
+                pass
+        elif 'context' in lowered and any(term in lowered for term in ('exceed', 'too long', 'overflow', 'maximum context')):
+            prefix = 'Traduction refusée : contexte trop long'
+        else:
+            prefix = 'Traduction locale refusée'
+        suffix = f' : {detail}' if detail else '. Consultez le journal du serveur LM Studio.'
+        raise RuntimeError(f'{prefix} (HTTP {error.code}){suffix}') from None
+    except (urllib.error.URLError, TimeoutError, ConnectionError):
+        raise RuntimeError('Connexion LM Studio indisponible. Vérifiez le serveur local et le modèle chargé.') from None
+
+
 def complete(config: dict, prompt: str) -> str:
     data={'model':config['model'],'prompt':prompt,'temperature':0,'max_tokens':1024,
           'stop':['<end_of_turn>','<eos>'],'stream':False}
-    request=urllib.request.Request(config['base_url']+'/v1/completions',data=json.dumps(data).encode(),headers={'Content-Type':'application/json'})
-    with urllib.request.urlopen(request,timeout=180) as response:
-        result=json.load(response)
+    result = _request_json(config, '/v1/completions', data)
     content=result['choices'][0]['text'].strip()
     if not content or len(content)>5000:
         raise ValueError('TranslateGemma a renvoyé une traduction vide ou excessive.')
@@ -296,7 +349,5 @@ def translate(regions: list[dict], source: str, target: str, config: dict,
 
 
 def chat(config: dict, data: dict) -> str:
-    request = urllib.request.Request(config["base_url"]+"/api/v1/chat", data=json.dumps(data).encode(), headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(request, timeout=180) as response:
-        result = json.load(response)
+    result = _request_json(config, '/api/v1/chat', data)
     return "\n".join(row["content"] for row in result["output"] if row["type"] == "message")

@@ -41,3 +41,5 @@ function setUILanguage(language) {window.uiLanguage=language==='en'?'en':'fr';do
 let uiTranslationPending=false;
 new MutationObserver(()=>{if(uiTranslationPending)return;uiTranslationPending=true;queueMicrotask(()=>{uiTranslationPending=false;translateInterface();});}).observe(document.body,{childList:true,characterData:true,subtree:true});
 setUILanguage(window.uiLanguage);
+
+Object.assign(englishUI,{'SUIVI DES TRAITEMENTS':'PROCESSING MONITOR','Le traitement actif et l’historique de tous vos projets.':'Active processing and history across all your projects.','Choisir un projet':'Choose a project','Document en cours':'Document processing','Ouvrir le document':'Open document','Ouvrir la file de traitement':'Open processing queue'});

@@ -94,7 +94,10 @@ class LocalEngines:
         from rapidocr import RapidOCR
         if self.ocr is None:
             self.ocr = RapidOCR(params={"Global.log_level": "error", "Global.model_root_dir": str(MODELS / "ocr"),
-                "EngineConfig.onnxruntime.intra_op_num_threads": 4, "Global.use_cls": False})
+                "EngineConfig.onnxruntime.intra_op_num_threads": 4, "Global.use_cls": False,
+                # The default minimum-side resize can enlarge a narrow strip
+                # far beyond the band height inside the detection model.
+                "Det.limit_type": "max", "Det.limit_side_len": 1600})
         lines = []
         height = 1600
         step = height - 160
@@ -102,19 +105,9 @@ class LocalEngines:
             if top and image.height - top < 160:
                 break
             progress(f"OCR : bande {top // step + 1}")
-            crop = image.crop((0, top, image.width, min(image.height, top + height)))
-            result = self.ocr(crop, use_cls=False)
-            texts = result.txts or ()
-            for polygon, text, score in zip(result.boxes if result.boxes is not None else [], texts, result.scores or ()):
-                if not text.strip() or score < .6:
-                    continue
-                points = [[float(p[0]), float(p[1]) + top] for p in polygon]
-                box = [max(0, int(min(p[0] for p in points))), max(0, int(min(p[1] for p in points))),
-                       min(image.width, int(max(p[0] for p in points)) + 1), min(image.height, int(max(p[1] for p in points)) + 1)]
-                if box[2] <= box[0] or box[3] <= box[1]:
-                    continue
+            for line in self._detect_band(image, top, min(image.height, top + height)):
+                box, score = line["box"], line["score"]
                 duplicate = next((old for old in lines if box_iou(old["box"], box) > .4), None)
-                line = {"box": box, "text": str(text), "score": float(score)}
                 if duplicate:
                     if score > duplicate["score"]:
                         duplicate.update(line)
@@ -125,6 +118,35 @@ class LocalEngines:
             if source == "en" and re.search(r"[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]", region["source_text"]):
                 region.update(status="ignored", kind="script_mismatch")
         return regions
+
+    def _detect_band(self, image: Image.Image, top: int, bottom: int) -> list[dict]:
+        # Limit both axes before allocating OCR input. Resize directly from
+        # the source box to avoid first copying a potentially very wide band.
+        width, height = image.width, bottom - top
+        scale = min(1., 1600 / max(width, height))
+        size = (max(1, round(width * scale)), max(1, round(height * scale)))
+        bounds = (0, top, width, bottom)
+        crop = (image.resize(size, Image.Resampling.LANCZOS, box=bounds)
+                if scale < 1 else image.crop(bounds))
+        scale_x, scale_y = width / size[0], height / size[1]
+        lines = []
+        # This scope releases the result (which includes image arrays and text
+        # crops) before the next inference, and closes pixels on failure too.
+        try:
+            result = self.ocr(crop, use_cls=False)
+            for polygon, text, score in zip(result.boxes if result.boxes is not None else [],
+                                            result.txts or (), result.scores or ()):
+                if not text.strip() or score < .6:
+                    continue
+                points = [[float(p[0]) * scale_x, float(p[1]) * scale_y + top] for p in polygon]
+                box = [max(0, int(min(p[0] for p in points))), max(0, int(min(p[1] for p in points))),
+                       min(image.width, int(max(p[0] for p in points)) + 1),
+                       min(image.height, int(max(p[1] for p in points)) + 1)]
+                if box[2] > box[0] and box[3] > box[1]:
+                    lines.append({"box": box, "text": str(text), "score": float(score)})
+        finally:
+            crop.close()
+        return lines
 
     def translate(self, regions: list[dict], source: str, target: str) -> int:
         pending = [region for region in regions if region["source_text"].strip() and not region["target_text"].strip() and region["status"] != "ignored"]

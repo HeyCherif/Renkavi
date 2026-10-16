@@ -414,10 +414,11 @@ document.addEventListener('keydown', (event) => { if ((event.ctrlKey || event.me
 
 function lockEditor(locked) {
   state.processing = locked;
-  for (const element of $('editor').querySelectorAll('button, input, textarea, select')) element.disabled = locked || state.batchActive;
+  const busy=locked||Boolean(state.singleJob);
+  for (const element of $('editor').querySelectorAll('button, input, textarea, select')) element.disabled = busy || state.batchActive;
   $('batch-editor-note').hidden = !state.batchActive;
-  if (state.batchActive && !locked) for(const element of $('editor').querySelectorAll('#page-list button, #view-variant, #zoom')) element.disabled=false;
-  if (!locked && !state.batchActive) {
+  if (state.batchActive && !busy) for(const element of $('editor').querySelectorAll('#page-list button, #view-variant, #zoom')) element.disabled=false;
+  if (!busy && !state.batchActive) {
     const m = state.engineStatus;
     $('process-all').disabled = isWordDocument(state.project)?!m?.translation?.ready:!m?.ready;
     $('process-ocr').disabled = !m?.ocr?.ready;
@@ -453,7 +454,7 @@ async function loadModels() {
 
 async function processStages(stages) {
   if (state.batchActive) { flash('La file batch utilise les moteurs. Mettez-la en pause pour un traitement individuel.'); return; }
-  if (state.processing || !state.project) return;
+  if (state.processing || state.singleJob || !state.project) return;
   if(isWordDocument(state.project))stages=stages.filter(stage=>!['ocr','inpaint'].includes(stage));
   if(!stages.length||!processingReady(stages,[state.project]))return;
   if(stages.includes('translate')&&!$('retranslate').checked){
@@ -476,10 +477,19 @@ async function processStages(stages) {
 }
 
 async function pollJob(reference) {
-  if (state.project?.project_id !== reference.project_id) return;
   try {
     const { job } = await request(`/api/projects/${reference.project_id}/tasks/${reference.id}`);
-    if (state.project?.project_id !== reference.project_id) return;
+    if (state.project?.project_id !== reference.project_id) {
+      if (['queued','running'].includes(job.state)) {
+        lockEditor(true);
+        setTimeout(() => pollJob(reference), 1200);
+      } else {
+        localStorage.removeItem('renkavi-active-job');
+        lockEditor(false);
+        refreshBatches();
+      }
+      return;
+    }
     $('job-panel').hidden = false;
     document.querySelector('#job-panel .job-title strong').textContent =
       job.state === 'completed' ? 'Traitement terminé' :
@@ -504,6 +514,9 @@ async function pollJob(reference) {
     }
     localStorage.removeItem('renkavi-active-job');
     const { project } = await request(`/api/projects/${reference.project_id}`);
+    if(state.project?.project_id!==reference.project_id||state.dirty){
+      lockEditor(false);refreshBatches();return;
+    }
     state.project = project;
     updateProjectMeta();
     state.regionId = null;
@@ -560,6 +573,7 @@ async function refreshModelCatalog() {
 }
 
 function lockModels(locked) {
+  locked=locked||Boolean(state.singleJob);
   for (const control of $('models-dialog').querySelectorAll('.installed-controls select, .installed-controls input, .installed-controls button, #connector-form input, #connector-form select, #connector-form button')) if (control.id !== 'close-models') control.disabled = locked;
 }
 
@@ -625,7 +639,7 @@ function selectionChanged() {
   $('clear-selection').disabled=!state.selected.size;
   if($('move-selected-chapters'))$('move-selected-chapters').disabled=!state.selected.size||state.processing||state.batchActive;
   const scope=$('batch-scope').value,batchFiles=selectedBatchFiles(),stages=batchStageModes()[$('batch-stages').value];
-  $('batch-start').disabled=!batchFiles.length||state.batchActive||state.processing||!processingReady(stages,batchFiles);
+  $('batch-start').disabled=!batchFiles.length||state.batchActive||state.processing||Boolean(state.singleJob)||!processingReady(stages,batchFiles);
   $('batch-start').textContent=scope==='all'?(files.length===1?tr('Traiter le fichier du projet'):`${tr('Traiter les')} ${files.length} ${tr('fichiers du projet')}`):(batchFiles.length===1?tr('Traiter le fichier sélectionné'):`${tr('Traiter')} ${batchFiles.length} ${tr('fichiers sélectionnés')}`);
   $('batch-scope-note').textContent=scope==='all'?tr('Tous les fichiers du projet seront traités, même ceux masqués par la recherche.'):tr('Seuls les fichiers cochés seront traités.');
   const preview=$('batch-file-preview');preview.replaceChildren();
@@ -735,6 +749,7 @@ function renderBatch(batch) {
   state.batch=batch;
   $('batch-empty').hidden=Boolean(batch);$('batch-progress-panel').hidden=!batch;
   if(!batch)return;
+  $('batch-used-models').textContent=Object.values(batch.models||{}).map(model=>model.name||model.id).filter(Boolean).join(' · ');
   const total=batch.items.reduce((n,i)=>n+i.total,0), done=batch.items.reduce((n,i)=>n+i.pages_done,0);
   $('batch-state').textContent=tr(batchLabels[batch.state]||batch.state);$('batch-state').dataset.state=batch.state;
   $('batch-totals').textContent=`${done}/${total} pages`;
@@ -772,17 +787,20 @@ async function refreshBatches() {
     const history=$('batch-history');const signature=JSON.stringify(data.batches.map(b=>[b.id,b.state]));
     if(history.dataset.signature!==signature) {history.replaceChildren();for(const [i,b] of data.batches.entries()){const option=document.createElement('option');option.value=b.id;option.textContent=batchOptionLabel(b,i,data.batches.length);history.append(option);}if(!data.batches.length)history.append(new Option('Aucun lot',''));history.dataset.signature=signature;}
     history.value=state.batchId||'';renderBatch(wanted);
+    state.singleJob=data.active_job;
+    $('queue-single').hidden=!data.active_job;
+    if(data.active_job)$('queue-single-message').textContent=`${data.active_job.title} · ${data.active_job.pages_done}/${data.active_job.total} pages · ${data.active_job.message}`;
     const active=data.batches.find(b=>b.id===data.active_id);
     $('queue-badge').hidden=!active;$('queue-badge').textContent=active?active.items.filter(i=>['pending','running'].includes(i.state)).length:0;
     if(state.engineStatus)$('batch-models').textContent=`${state.engineStatus.translation?.name||'Traduction'} · ${state.engineStatus.inpainting?.name||'Nettoyage'}`;
     selectionChanged();lockModels(state.processing||state.batchActive);
-    if(!state.processing)lockEditor(false);
+    lockEditor(state.processing);
     if(wasActive&&!state.batchActive) {
       await loadProjects();
       if(state.project&&!state.dirty&&!$('editor').hidden)await openProject(state.project.project_id);
     }
   } catch(error) {$('batch-message').textContent=`Suivi indisponible : ${error.message}`;}
-  finally {state.batchFetching=false;state.batchTimer=setTimeout(refreshBatches,state.batchActive?1400:7000);}
+  finally {state.batchFetching=false;state.batchTimer=setTimeout(refreshBatches,state.batchActive||state.singleJob?1400:7000);}
 }
 
 $('batch-form').addEventListener('submit',async event=>{
@@ -793,7 +811,7 @@ $('batch-form').addEventListener('submit',async event=>{
     if($('batch-scope').value==='selected'&&!state.selected.size)throw Error(tr('Sélectionnez au moins un fichier.'));
     const data=await postJson('/api/batches',{workspace_id:state.workspace.id,scope:$('batch-scope').value,project_ids:[...state.selected],stages:modes[$('batch-stages').value],
       skip_existing:$('batch-skip').checked,auto_export:$('batch-export').checked,retranslate:$('batch-retranslate').checked,glossary:glossaryFrom($('batch-glossary').value)});
-    state.batchId=data.batch.id;state.batchActive=true;renderBatch(data.batch);flash('File lancée. Les fichiers seront traités successivement.');refreshBatches();
+    state.batchId=data.batch.id;state.batchActive=true;renderBatch(data.batch);flash('File lancée. Les fichiers seront traités successivement.');await navigate('batch');refreshBatches();
   }catch(error){flash(error.message);selectionChanged();}
 });
 for(const action of ['pause','resume','cancel']) $(`batch-${action}`).addEventListener('click',async()=>{
@@ -802,6 +820,9 @@ for(const action of ['pause','resume','cancel']) $(`batch-${action}`).addEventLi
   catch(error){flash(error.message);}finally{button.disabled=false;}
 });
 $('batch-history').addEventListener('change',()=>{state.batchId=$('batch-history').value;refreshBatches();});
+$('open-queue').addEventListener('click',()=>navigate('batch'));
+$('queue-projects').addEventListener('click',()=>navigate('library'));
+$('queue-single-open').addEventListener('click',()=>{if(state.singleJob)openProject(state.singleJob.project_id);});
 $('project-search').addEventListener('input',renderProjectList);
 $('select-all-projects').addEventListener('change',()=>{for(const p of visibleProjects().filter(p=>!p.error)){if($('select-all-projects').checked)state.selected.add(p.project_id);else state.selected.delete(p.project_id);}renderProjectList();});
 $('clear-selection').addEventListener('click',()=>{state.selected.clear();renderProjectList();});
@@ -826,19 +847,19 @@ for(const id of batchSettingIds) $(id).addEventListener('input',()=>{const saved
 
 // Project workspace navigation. Historical project endpoints represent individual chapters.
 function hideScreens() {
-  for (const id of ['home-screen','projects-screen','settings-screen','models-dialog','library','editor']) $(id).hidden=true;
+  for (const id of ['home-screen','projects-screen','settings-screen','models-dialog','library','editor','queue-screen']) $(id).hidden=true;
   document.body.classList.remove('editing');
 }
 async function navigate(name) {
   if (state.dirty && !(await saveProject())) return;
   hideScreens();
   document.querySelectorAll('.nav-item').forEach(el=>el.classList.toggle('active',el.id===`nav-${name}`));
-  const screens={home:'home-screen',library:'projects-screen',settings:'settings-screen',models:'models-dialog',batch:state.workspace?'library':'projects-screen'};
+  const screens={home:'home-screen',library:'projects-screen',settings:'settings-screen',models:'models-dialog',batch:'queue-screen'};
   $(screens[name]||'home-screen').hidden=false;
   $('workspace-location').textContent=tr({home:'Accueil',library:'Projets',settings:'Paramètres',models:'Modèles',batch:'File de traitement'}[name]);
   if(name==='library'||name==='home')await loadWorkspaces();
   if(name==='models') { try {await Promise.all([refreshModelCatalog(),refreshModelHub()]);lockModels(state.processing||state.batchActive);} catch(error){flash(error.message);} }
-  if(name==='batch'&&state.workspace)$('batch-panel').scrollIntoView({behavior:'smooth'});
+  if(name==='batch'){state.batchId=state.batches?.find(b=>['queued','running','pausing','cancelling'].includes(b.state))?.id||state.batchId;await refreshBatches();}
 }
 function workspaceCard(workspace) {
   const card=document.createElement('button');card.type='button';card.className='workspace-card';

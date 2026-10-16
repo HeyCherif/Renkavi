@@ -11,6 +11,15 @@ from backend.projects.store import atomic_json
 TERMINAL={'completed','completed_with_errors','failed','cancelled','paused','interrupted'}
 
 
+def blocking_failure(error):
+    message=str(error).casefold()
+    if any(text in message for text in ('out of memory','bad allocation','memoryerror','winerror 1455','cuda_error_out_of_memory')):
+        return 'memory'
+    if any(text in message for text in ('cuda est indisponible','cuda is not available','échec de démarrage du moteur cuda','moteurs indisponibles','moteur de traduction indisponible','connexion lm studio indisponible','impossible de démarrer','contexte trop long')):
+        return 'engine'
+    return None
+
+
 class BatchManager:
     def __init__(self,pipeline,export_options=None):
         self.pipeline=pipeline
@@ -56,7 +65,7 @@ class BatchManager:
 
     def list(self):
         with self.lock:
-            return sorted([self.get(bid) for bid in self.batches],key=lambda b:b['created_at'],reverse=True)[:20]
+            return sorted([self.get(bid) for bid in self.batches],key=lambda b:(b['id']==self.active,b['created_at']),reverse=True)[:20]
 
     def start(self,data):
         with self.lock:
@@ -119,6 +128,11 @@ class BatchManager:
             if action=='resume':
                 if batch['state'] not in {'paused','interrupted','completed_with_errors','failed'}:raise ValueError('Cette file ne peut pas être reprise.')
                 if self.active or self.pipeline._active or self.pipeline.batch_owner:raise ValueError('Les moteurs sont déjà occupés.')
+                if self.pipeline.activity_guard():raise ValueError('Installation de modèle en cours. Attendez sa fin avant de reprendre.')
+                if not self.pipeline.engine_factory:
+                    from backend.ai.registry import selected_model
+                    batch['models']={kind:copy.deepcopy(selected_model(kind)) for kind in ('translation','inpainting')}
+                batch.pop('failure_kind',None)
                 for item in batch['items']:
                     if item['state'] in {'failed','paused','running'}:item.update(state='pending',error=None,export_ready=False)
                 self._launch(batch)
@@ -176,6 +190,8 @@ class BatchManager:
                         if done:break
                     with self.lock:
                         item.update(state=job['state'],seconds=job.get('seconds',0),error=job.get('error'))
+                    if job['state']=='failed' and self._pause_failure(batch,item,job.get('error')):
+                        break
                     if job['state']=='completed' and options['auto_export'] and 'render' in options['stages']:
                         export_project(self.store,project['project_id'],options.get('export_options'))
                         with self.lock:item['export_ready']=True
@@ -184,14 +200,16 @@ class BatchManager:
                     with self.lock:
                         item.update(state='failed',error=str(exc),message=str(exc))
                         self._save(batch)
+                    if self._pause_failure(batch,item,exc):break
             with self.lock:
-                remaining=any(i['state'] in {'pending','paused','running'} for i in batch['items'])
+                remaining=any(i['state'] in {'pending','paused','running','failed'} for i in batch['items'])
                 if batch.get('intent')=='cancel':
                     for item in batch['items']:
                         if item['state'] in {'pending','paused','running'}:item['state']='cancelled'
                     batch.update(state='cancelled',message='File arrêtée. Les résultats enregistrés sont conservés.')
                 elif batch.get('intent')=='pause' and remaining:
-                    batch.update(state='paused',message='En pause · reprenez la file pour continuer')
+                    reason='Mémoire insuffisante' if batch.get('failure_kind')=='memory' else 'Moteur indisponible' if batch.get('failure_kind') else 'En pause'
+                    batch.update(state='paused',message=reason+' · vérifiez les modèles puis reprenez. Les résultats enregistrés sont conservés.')
                 else:
                     errors=sum(i['state']=='failed' for i in batch['items'])
                     batch.update(state='completed_with_errors' if errors else 'completed',
@@ -216,3 +234,13 @@ class BatchManager:
         # A resumed worker must never be cleared by the previous worker's finally.
         if self.active==batch['id']:self.active=None
         if self.pipeline.batch_owner==batch['id']:self.pipeline.batch_owner=None
+
+    def _pause_failure(self,batch,item,error):
+        kind=blocking_failure(error)
+        if not kind:return False
+        # The page job has finished; dispose failed sessions before any retry.
+        self.pipeline.close(timeout=0)
+        with self.lock:
+            if batch.get('intent')!='cancel':batch.update(intent='pause',failure_kind=kind)
+            self._save(batch)
+        return True

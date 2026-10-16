@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import logging
 import threading
 import time
 import uuid
@@ -428,6 +429,11 @@ class PipelineManager:
         except Exception as exc:
             self._update(job, state="failed", message=str(exc), error=f"{type(exc).__name__}: {exc}", seconds=round(time.perf_counter()-started, 2))
         finally:
+            if job['state']=='failed':
+                engine,self.engines=self.engines,None
+                if engine is not None and hasattr(engine,'close'):
+                    try:engine.close()
+                    except Exception:logging.getLogger(__name__).exception('Libération du moteur après échec impossible')
             with self._lock:
                 self._active = None
                 self._events[job['id']].set()

@@ -28,6 +28,16 @@ class FakeEngines:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_failed_job_disposes_engine_sessions_before_releasing_ownership(self):
+        from unittest.mock import Mock
+        engine=FakeEngines();engine.detect=Mock(side_effect=RuntimeError('bad allocation'));engine.close=Mock()
+        manager=PipelineManager(self.store,lambda:engine)
+        result=self.run_job(manager,['ocr'])
+        self.assertEqual(result['state'],'failed')
+        self.assertTrue(manager.wait(result['id'],2))
+        engine.close.assert_called_once()
+        self.assertIsNone(manager.engines)
+
     def test_changed_model_regenerates_fresh_machine_draft_and_preserves_human_text(self):
         import copy
         from unittest.mock import patch

@@ -244,7 +244,14 @@ def make_server(store: ProjectStore, port: int = 8765) -> ThreadingHTTPServer:
                 self._json(200, {"projects": store.list_projects()})
                 return
             if parts == ['api','batches']:
-                if method=='GET':self._json(200,{'batches':batches.list(),'active_id':batches.active});return
+                if method=='GET':
+                    with pipeline._lock:
+                        job=pipeline._jobs.get(pipeline._active) if not pipeline.batch_owner else None
+                        active_job={key:job.get(key) for key in ('id','project_id','state','stage','message','pages_done','total')} if job else None
+                        if active_job:
+                            active_job['title']=store.load(job['project_id'])['title']
+                        self._json(200,{'batches':batches.list(),'active_id':batches.active,'active_job':active_job})
+                    return
                 if method=='POST':self._json(202,{'batch':batches.start(json.loads(self._body()))});return
             if len(parts)==3 and parts[:2]==['api','batches'] and method=='GET':
                 self._json(200,{'batch':batches.get(parts[2])});return

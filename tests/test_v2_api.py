@@ -12,6 +12,20 @@ from backend.projects.store import ProjectStore
 
 
 class ApiTests(unittest.TestCase):
+    def test_queue_reports_standalone_job_without_model_configuration(self):
+        project=self.store.create('Document actif','en','fr')
+        pipeline=self.server.pipeline
+        pipeline._active='standalone'
+        pipeline._jobs['standalone']={'id':'standalone','project_id':project['project_id'],'state':'running',
+            'stage':'translate','message':'Traduction','pages_done':0,'total':1,'models':{'secret':'never expose'}}
+        try:
+            status,payload=self.request('GET','/api/batches')
+            value=json.loads(payload)
+            self.assertEqual(status,200)
+            self.assertEqual(value['active_job']['title'],'Document actif')
+            self.assertNotIn('models',value['active_job'])
+        finally:pipeline._active=None
+
     def test_foreign_hosts_and_origins_are_rejected(self):
         self.assertEqual(self.request('GET', '/api/health', headers={'Host': 'attacker.example'})[0], 403)
         headers = {'X-Renkavi-Client': '1', 'Origin': 'http://attacker.example'}
