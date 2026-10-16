@@ -271,7 +271,7 @@ class ModelHubTests(unittest.TestCase):
         with patch("backend.ai.model_hub.registry.add_model", return_value={}) as add:
             hub.control(job["id"], "install")
             self.wait(hub, job["id"], "installed")
-            add.assert_called_once_with("translation", str(hub._paths(result)[1]), root=self.root, activate=False, test=False)
+            add.assert_called_once_with("translation", str(hub._paths(result)[1]), root=self.root.resolve(), activate=False, test=False)
         destination = hub._paths(result)[1]
         destination.write_bytes(b"GGUF" + b"z" * (len(self.payload)-4))
         self.assertFalse(hub.catalog()["models"][0]["downloaded"])

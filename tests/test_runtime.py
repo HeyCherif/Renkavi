@@ -15,7 +15,7 @@ class RuntimeTests(unittest.TestCase):
 
     def test_frozen_resources_are_separate_from_user_state(self):
         with tempfile.TemporaryDirectory() as folder:
-            home=Path(folder)/'user';resources=Path(folder)/'bundle'
+            home=Path(folder).resolve()/'user';resources=Path(folder).resolve()/'bundle'
             with patch.dict(os.environ,{'RENKAVI_HOME':str(home)},clear=True),patch.object(sys,'frozen',True,create=True),patch.object(sys,'_MEIPASS',str(resources),create=True):
                 self.assertEqual(runtime.resource_root(),resources)
                 self.assertEqual(runtime.models_root(),home/'models')
