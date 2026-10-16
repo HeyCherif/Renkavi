@@ -1,0 +1,67 @@
+name: Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version without the v prefix
+        required: true
+        default: 0.3.0-beta.1
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+          architecture: x64
+          cache: pip
+          cache-dependency-path: requirements*.txt
+      - name: Install desktop and build dependencies
+        run: python -m pip install -r requirements-build.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests -v
+      - name: Resolve version
+        shell: pwsh
+        env:
+          DISPATCH_VERSION: ${{ inputs.version }}
+        run: |
+          $releaseVersion = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME -replace '^v', '' } else { $env:DISPATCH_VERSION }
+          if ($releaseVersion -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.-]+)?$') { throw 'Invalid release version' }
+          "RENKAVI_VERSION=$releaseVersion" >> $env:GITHUB_ENV
+      - name: Build and smoke test frozen executable
+        run: python scripts/build_release.py --version "$env:RENKAVI_VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Renkavi-${{ env.RENKAVI_VERSION }}-windows-x64
+          path: release/*
+          if-no-files-found: error
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: Renkavi-*
+          path: release
+          merge-multiple: true
+      - name: Publish prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --title "Renkavi $RELEASE_TAG" --prerelease --notes "Windows x64 beta. Extract the portable ZIP completely and launch Renkavi.exe. WebView2 Runtime is required. Models install separately through the model manager. See docs/release.md."
+          fi
+          gh release upload "$RELEASE_TAG" release/* --clobber
