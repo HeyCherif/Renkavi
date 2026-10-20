@@ -1,11 +1,11 @@
 # Releases Windows
 
-La version `0.3.0-beta.2` est une **préversion** : les fonctions évoluent et une
+La version `0.3.0-beta.3` est une **préversion** : les fonctions évoluent et une
 sauvegarde des projets est recommandée avant une mise à jour.
 
 ## Utiliser la version portable
 
-1. Télécharger `Renkavi-0.3.0-beta.2-windows-x64.zip` depuis les releases GitHub.
+1. Télécharger `Renkavi-0.3.0-beta.3-windows-x64.zip` depuis les releases GitHub.
 2. Extraire entièrement le ZIP dans un dossier accessible en écriture.
 3. Lancer `Renkavi/Renkavi.exe`.
 
@@ -32,7 +32,7 @@ Utiliser Windows x64 et Python 3.14 dans un environnement virtuel dédié :
 python -m venv .venv-build
 .venv-build\Scripts\python -m pip install -r requirements-build.txt
 .venv-build\Scripts\python -m unittest discover -s tests -v
-.venv-build\Scripts\python scripts/build_release.py --version 0.3.0-beta.2
+.venv-build\Scripts\python scripts/build_release.py --version 0.3.0-beta.3
 ```
 
 Le script construit une application PyInstaller en dossier, exécute le programme
@@ -58,13 +58,13 @@ dédié évite d'y ajouter des paquets étrangers à l'application.
 Pour inspecter uniquement les sources sélectionnées, sans construire l'exécutable :
 
 ```powershell
-python scripts/build_release.py --source-only --version 0.3.0-beta.2
+python scripts/build_release.py --source-only --version 0.3.0-beta.3
 ```
 
 Vérification d'une archive téléchargée :
 
 ```powershell
-Get-FileHash .\Renkavi-0.3.0-beta.2-windows-x64.zip -Algorithm SHA256
+Get-FileHash .\Renkavi-0.3.0-beta.3-windows-x64.zip -Algorithm SHA256
 ```
 
 Comparer la valeur obtenue à la ligne correspondante de `SHA256SUMS`.

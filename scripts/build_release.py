@@ -1,6 +1,6 @@
 """Build the Windows desktop ZIP and a deliberately scoped source archive.
 
-Run from a clean virtualenv: python scripts/build_release.py --version 0.3.0-beta.2
+Run from a clean virtualenv: python scripts/build_release.py --version 0.3.0-beta.3
 """
 from __future__ import annotations
 
@@ -104,13 +104,13 @@ def checksum_files(paths: list[Path], destination: Path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--version', default='0.3.0-beta.2')
+    parser.add_argument('--version', default='0.3.0-beta.3')
     parser.add_argument('--output', type=Path, default=ROOT / 'release')
     parser.add_argument('--source-only', action='store_true', help='Only produce the scoped source ZIP (any OS)')
     args = parser.parse_args()
     version = args.version.removeprefix('v')
     if not re.fullmatch(r'\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?', version):
-        parser.error('version must be a semantic version, e.g. 0.3.0-beta.2')
+        parser.error('version must be a semantic version, e.g. 0.3.0-beta.3')
     if not args.source_only and (sys.platform != 'win32' or platform.machine().lower() not in {'amd64', 'x86_64'}):
         parser.error('the desktop release must be built with Windows x64 Python')
     output = args.output.resolve()

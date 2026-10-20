@@ -4,11 +4,11 @@
 
 **Atelier local de traduction de documents et de récits illustrés.** Application Windows avec fenêtre native pywebview / Microsoft Edge WebView2.
 
-Version **0.3.0-beta.2** — 16 octobre 2026. Cette version bêta ajoute un suivi global des traitements, suspend les lots en cas d’erreur mémoire ou de moteur indisponible, et limite les allocations OCR. Une relecture des traductions reste nécessaire.
+Version **0.3.0-beta.3** — 20 octobre 2026. Cette version bêta ajoute les échanges JSON de traduction avec ChatGPT, la relecture du contexte et les protections contre les réponses périmées. Les traitements OCR, de restauration et de composition restent locaux. Une relecture des traductions reste nécessaire.
 
 ## Installer la version Windows
 
-1. Télécharger `Renkavi-0.3.0-beta.2-windows-x64.zip` dans les [releases](https://github.com/zamakz641-byte/Renkavi/releases).
+1. Télécharger `Renkavi-0.3.0-beta.3-windows-x64.zip` dans les [releases](https://github.com/HeyCherif/Renkavi/releases).
 2. Extraire entièrement l'archive et ouvrir `Renkavi/Renkavi.exe`.
 3. Installer [Microsoft Edge WebView2 Runtime Evergreen x64](https://developer.microsoft.com/microsoft-edge/webview2/) s'il manque.
 4. Configurer les modèles dans **Modèles** : les deux poids OCR, un traducteur et un moteur de restauration. Aucun poids IA n'est inclus dans le téléchargement de l'application.
@@ -61,7 +61,7 @@ python -m venv .venv
 ```powershell
 .venv\Scripts\python.exe -m unittest discover -s tests -q
 .venv\Scripts\python.exe -m pip install -r requirements-build.txt
-.venv\Scripts\python.exe scripts/build_release.py --version 0.3.0-beta.2
+.venv\Scripts\python.exe scripts/build_release.py --version 0.3.0-beta.3
 ```
 
 Voir [la procédure de release](docs/release.md). Le paquet portable est construit et testé sur Windows ; l'archive source est limitée aux fichiers applicatifs et aux tests synthétiques.
