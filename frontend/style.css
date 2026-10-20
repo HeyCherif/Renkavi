@@ -49,3 +49,9 @@
 #queue-single{padding:20px 24px;margin-bottom:18px}#queue-single p{overflow-wrap:anywhere}
 #batch-used-models:empty{display:none}.queue-history progress{width:100%;margin-top:12px}
 @media(max-width:700px){.queue-page-heading,.queue-history .section-heading{align-items:flex-start;flex-direction:column}.queue-history{padding:18px}.queue-history select{width:100%;max-width:100%}}
+
+.chatgpt-panel{padding:20px 24px;margin:14px 0;background:var(--panel,#181c25)}
+.chatgpt-panel h2{margin:0}.chatgpt-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
+.chatgpt-path{font-family:monospace;font-size:12px;overflow-wrap:anywhere;color:var(--muted)}
+#chatgpt-preview{width:min(780px,90vw);max-height:85vh;overflow:auto;padding:24px;background:var(--panel,#181c25);color:var(--text,#edf1f7);border:1px solid var(--border,#343946);border-radius:14px}
+#chatgpt-preview::backdrop{background:#0009}#chatgpt-preview-lines article{border-bottom:1px solid var(--border,#343946);padding:10px 0}#chatgpt-preview-lines p{white-space:pre-wrap;overflow-wrap:anywhere}

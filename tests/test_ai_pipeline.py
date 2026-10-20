@@ -28,6 +28,42 @@ class FakeEngines:
 
 
 class PipelineTests(unittest.TestCase):
+    def test_context_review_refreshes_render_and_export_and_closes_engines(self):
+        from unittest.mock import patch,Mock
+        from backend.ai.pipeline import page_directory,read_meta
+        engine=FakeEngines();engine.close=Mock()
+        primary={'id':'gemma','name':'Gemma','adapter':'lmstudio','config':{'profile':'translategemma','model':'renkavi-test','model_key':'gemma','base_url':'http://127.0.0.1:1234'}}
+        paint={'id':'paint','name':'Paint','adapter':'telea'}
+        reviewer={'id':'review','name':'Qwen','adapter':'lmstudio','config':{'model':'renkavi-review','model_key':'qwen','base_url':'http://127.0.0.1:1234'}}
+        snapshot={'translation':primary,'inpainting':paint,'review':reviewer}
+        def review(p,*args,**kwargs):
+            p['pages'][0]['regions'][0]['target_text']='Traduction corrigée'
+            return {'checked':1,'corrected':1,'rejected':0}
+        with patch('backend.ai.registry.selected_model',side_effect=lambda kind:snapshot[kind]),patch('backend.ai.engines.model_status',return_value={k:{'ready':True} for k in ('ocr','translation','inpainting')}),patch('backend.ai.engines.LocalEngines',return_value=engine),patch('backend.ai.context_review.review_project',side_effect=review),patch('backend.ai.local_llm.ensure_loaded'),patch('backend.ai.local_llm.release_loaded'):
+            manager=PipelineManager(self.store)
+            job=manager.start(self.project['project_id'],{'expected_revision':self.project['revision']},models_snapshot=snapshot)
+            self.assertTrue(manager.wait(job['id'],10))
+            result=manager.get(self.project['project_id'],job['id'])
+        self.assertEqual(result['state'],'completed',result.get('error'))
+        self.assertEqual(result['review']['corrected'],1)
+        saved=self.store.load(self.project['project_id'])
+        self.assertEqual(saved['pages'][0]['regions'][0]['target_text'],'Traduction corrigée')
+        meta=read_meta(page_directory(self.store,saved['project_id'],saved['pages'][0]['id']))
+        self.assertFalse(meta['review_pending'])
+        self.assertTrue(output_file(self.store,saved['project_id'],saved['pages'][0]['id'],'rendered').is_file())
+        self.assertTrue(export_project(self.store,saved['project_id']).is_file())
+        engine.close.assert_called_once()
+
+    def test_export_refuses_a_render_waiting_for_context_review(self):
+        from backend.ai.pipeline import page_directory,read_meta
+        from backend.projects.store import atomic_json
+        manager=PipelineManager(self.store,FakeEngines)
+        self.assertEqual(self.run_job(manager,['ocr','translate','render'])['state'],'completed')
+        page=self.store.load(self.project['project_id'])['pages'][0]
+        path=page_directory(self.store,self.project['project_id'],page['id'])/'meta.json'
+        meta=read_meta(path.parent);meta['review_pending']=True;atomic_json(path,meta)
+        with self.assertRaisesRegex(FileNotFoundError,'relecture'):output_file(self.store,self.project['project_id'],page['id'],'rendered')
+
     def test_failed_job_disposes_engine_sessions_before_releasing_ownership(self):
         from unittest.mock import Mock
         engine=FakeEngines();engine.detect=Mock(side_effect=RuntimeError('bad allocation'));engine.close=Mock()

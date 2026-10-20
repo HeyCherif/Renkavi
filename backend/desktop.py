@@ -34,7 +34,7 @@ class ExportBridge:
 
     def save_export(self, kind, identifier, options=None):
         """Select a destination for a server-generated archive; accept no source path."""
-        if kind not in ('project', 'workspace') or not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identifier):
+        if kind not in ('project', 'workspace', 'chatgpt') or not isinstance(identifier, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', identifier):
             raise ValueError('Export invalide.')
         if options is None:
             options = {}

@@ -90,6 +90,9 @@ class BatchManager:
             stages=data.get('stages',list(STAGES))
             if not isinstance(stages,list) or not stages or any(s not in STAGES for s in stages) or len(set(stages))!=len(stages):
                 raise ValueError('Étapes batch invalides.')
+            from backend.settings import Settings
+            if 'translate' in stages and Settings(self.store.data_dir).get().get('translation_mode')=='chatgpt':
+                raise ValueError('Mode ChatGPT : utilisez le batch OCR, puis les échanges JSON. Après import, lancez Nettoyage et lettrage.')
             for key in ('auto_export','skip_existing','retranslate'):
                 if key in data and not isinstance(data[key],bool):raise ValueError('Options batch invalides.')
             glossary=data.get('glossary',{})

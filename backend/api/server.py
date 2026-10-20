@@ -29,6 +29,7 @@ from backend.version import __version__
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
 WEB_ROOT = resource_root() / "frontend"
 WEB_FILES = {"/": "index.html", "/app.js": "app.js", "/style.css": "style.css", "/i18n.js":"i18n.js"}
+WEB_FILES['/chatgpt.js']='chatgpt.js'
 WEB_FILES.update({f'/vendor/{name}':f'vendor/{name}' for name in ('tabler.min.css','tabler-sprite.svg','jszip.min.js','docx-preview.min.js')})
 WEB_FILES.update({'/brand/renkavi.png':'brand/renkavi.png','/favicon.ico':'brand/renkavi.ico'})
 
@@ -136,7 +137,7 @@ def make_server(store: ProjectStore, port: int = 8765) -> ThreadingHTTPServer:
                 return
             parts = [unquote(p) for p in parsed.path.strip("/").split("/")]
             if parts == ["api", "health"] and method == "GET":
-                self._json(200, {"ok": True, "version": 3, "application_version":__version__, "ui_version":"studio-2026.10.16-desktop", "data_dir":str(store.data_dir),"features":{"docx_pdf_import":True,"native_download":True,"project_folders":True,"translation_context_version":2,"desktop":True}})
+                self._json(200, {"ok": True, "version": 3, "application_version":__version__, "ui_version":"studio-2026.10.16-chatgpt-json", "data_dir":str(store.data_dir),"features":{"docx_pdf_import":True,"native_download":True,"project_folders":True,"translation_context_version":2,"desktop":True,"chatgpt_json":True}})
                 return
             if parts==['api','settings']:
                 if method=='GET':self._json(200,{'settings':settings.get(),'data_dir':str(store.data_dir)});return
@@ -329,6 +330,27 @@ def make_server(store: ProjectStore, port: int = 8765) -> ThreadingHTTPServer:
                 return
             if len(parts) >= 3 and parts[:2] == ["api", "projects"]:
                 project_id = parts[2]
+                if len(parts)>=4 and parts[3]=='chatgpt':
+                    from backend.projects import chatgpt_exchange as exchange
+                    if len(parts)==4 and method=='GET':
+                        self._json(200,{'exchange':exchange.latest_exchange(store,project_id)});return
+                    if len(parts)==6 and method=='GET' and parts[5] in {'request','template'}:
+                        directory=exchange._directory(store,project_id,parts[4])
+                        name='demande.json' if parts[5]=='request' else 'modele-reponse.json'
+                        self._file(directory/name,download_name=name);return
+                    if len(parts)==5 and method=='POST' and parts[4] in {'export','import'}:
+                        data=json.loads(self._body(exchange.MAX_RESPONSE))
+                        if not isinstance(data,dict):raise ValueError('Requête JSON invalide.')
+                        with pipeline._lock:
+                            if pipeline._active or pipeline.batch_owner:raise ValueError('Attendez la fin du traitement avant un échange ChatGPT.')
+                            if parts[4]=='export':
+                                self._json(201,{'exchange':exchange.export_request(store,project_id,data['expected_revision'])});return
+                            dry=data.get('dry_run',False)
+                            if not isinstance(dry,bool):raise ValueError('Option d’aperçu invalide.')
+                            if 'response' in data:
+                                result=exchange.import_response(store,project_id,data['response'],data['expected_revision'],dry_run=dry)
+                            else:result=exchange.import_from_folder(store,project_id,data['expected_revision'],dry_run=dry)
+                            self._json(200,result);return
                 if len(parts) == 4 and parts[3] == 'source-docx' and method == 'GET':
                     from backend.projects.documents_word import SOURCE_FILE, LEGACY_SOURCE_FILE
                     project = store.load(project_id)
@@ -410,6 +432,12 @@ def make_server(store: ProjectStore, port: int = 8765) -> ThreadingHTTPServer:
 
     server=ThreadingHTTPServer(("127.0.0.1", port), Handler)
     def native_export(kind,identifier,options=None):
+        if kind=='chatgpt':
+            from backend.projects.chatgpt_exchange import _directory
+            directory=_directory(store,identifier,(options or {}).get('exchange_id'))
+            path=directory/'demande.json'
+            if not path.is_file():raise FileNotFoundError('Préparez un échange ChatGPT avant l’export.')
+            return path,'demande.json'
         selected={**settings.get()['export'],**(options or {})}
         if kind=='project':
             project=store.load(identifier)

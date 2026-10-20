@@ -30,6 +30,7 @@ function markDirty() {
 }
 
 function currentPage() { return state.project?.pages[state.pageIndex] || null; }
+function chatgptMode() { return state.settings?.translation_mode === 'chatgpt'; }
 function currentRegion() { return currentPage()?.regions.find((item) => item.id === state.regionId) || null; }
 function projectUrl(path = '') { return `/api/projects/${encodeURIComponent(state.project.project_id)}${path}`; }
 
@@ -53,6 +54,8 @@ function updateProjectMeta() {
   const engines=[...new Set(translated.map(region=>region.translation_engine).filter(Boolean))];
   const contextual=translated.filter(region=>region.translation_context_version >= 2).length;
   $('project-meta').textContent+=engines.length?` · Modèle réellement appliqué : ${engines.join(', ')} · Contexte transmis : ${contextual}/${translated.length}`:' · Aucune traduction appliquée';
+  const reviewed=translated.filter(region=>region.translation_review?.accepted);
+  if(reviewed.length) $('project-meta').textContent+=` · ${tr('Relecture IA')} : ${reviewed.length}/${translated.length}`;
 }
 
 async function openProject(id) {
@@ -82,6 +85,7 @@ async function openProject(id) {
     renderPages();
     renderPage();
     $('job-panel').hidden = true;
+    if(window.refreshChatGPTExchange)refreshChatGPTExchange();
     const { job } = await request(projectUrl('/tasks'));
     if (job && ['queued', 'running'].includes(job.state)) {
       const reference = { project_id: id, id: job.id };
@@ -421,8 +425,10 @@ function lockEditor(locked) {
   if (!busy && !state.batchActive) {
     const m = state.engineStatus;
     $('process-all').disabled = isWordDocument(state.project)?!m?.translation?.ready:!m?.ready;
+    if(chatgptMode())$('process-all').disabled=!isWordDocument(state.project)&&!m?.ocr?.ready;
     $('process-ocr').disabled = !m?.ocr?.ready;
     $('process-translate').disabled = !m?.translation?.ready;
+    if(chatgptMode())$('process-translate').disabled=true;
     $('process-render').disabled = !isWordDocument(state.project)&&!m?.inpainting?.ready;
   }
   if(isWordDocument(state.project))for(const control of $('editor').querySelectorAll('#source-text,#add-region,#delete-region,.coordinates input,#region-form details input,#region-form details select'))control.disabled=true;
@@ -449,6 +455,7 @@ async function loadModels() {
     lockEditor(state.processing);
     selectionChanged();
     renderDashboard();renderInstalledModels();
+    if(window.updateChatGPTMode)updateChatGPTMode();
   } catch (error) { $('model-summary').textContent = error.message; }
 }
 
@@ -473,6 +480,7 @@ async function processStages(stages) {
     localStorage.setItem('renkavi-active-job', JSON.stringify(reference));
     lockEditor(true);
     pollJob(reference);
+    return reference;
   } catch (error) { flash(error.message); }
 }
 
@@ -495,8 +503,9 @@ async function pollJob(reference) {
       job.state === 'completed' ? 'Traitement terminé' :
       ['failed', 'interrupted'].includes(job.state) ? 'Traitement interrompu' : 'Traitement en cours';
     $('job-progress').value = job.total ? 100 * job.pages_done / job.total : 0;
-    const engines = job.models ? ` · ${job.models.translation.name} · ${job.models.inpainting.name}` : '';
-    $('job-message').textContent = `${job.message} · ${job.pages_done}/${job.total} pages · ${job.regions} zones${engines}`;
+    const engines = job.models ? `${job.stages.includes('translate')?` · ${job.models.translation.name}`:''}${job.stages.some(s=>['render','inpaint'].includes(s))?` · ${job.models.inpainting.name}`:''}${job.models.review ? ` · ${tr('Relecture IA')} : ${job.models.review.name}` : ''}` : '';
+    const review=job.review?` · ${tr('Répliques vérifiées')} : ${job.review.checked} · ${tr('Corrections')} : ${job.review.corrected} · ${tr('À vérifier')} : ${job.review.rejected}`:'';
+    $('job-message').textContent = `${job.message} · ${job.pages_done}/${job.total} pages · ${job.regions} zones${engines}${review}`;
     document.querySelectorAll('#stage-tracker [data-stage]').forEach(node => {
       const index = ['ocr', 'translate', 'inpaint', 'render'].indexOf(node.dataset.stage);
       const current = ['ocr', 'translate', 'inpaint', 'render'].indexOf(job.stage);
@@ -527,6 +536,11 @@ async function pollJob(reference) {
     renderPages();
     renderPage();
     lockEditor(false);
+    if(window.refreshChatGPTExchange)refreshChatGPTExchange();
+    if(state.chatgptAfterOCR===reference.project_id){
+      state.chatgptAfterOCR=null;
+      if(job.state==='completed'&&job.stages.includes('ocr')&&window.createChatGPTExchange)await createChatGPTExchange();
+    }
     flash(job.state === 'completed' ? (job.stages.includes('translate') && !job.stages.includes('render') ? tr('Traduction du texte terminée. Lancez « Nettoyer et rendre » pour actualiser les images et l’export.') : `Terminé : ${job.regions} zones, ${job.seconds} s.`) : `Traitement arrêté : ${job.message}`);
   } catch (error) {
     $('job-message').textContent = `Suivi indisponible : ${error.message}. Nouvelle tentative…`;
@@ -534,7 +548,7 @@ async function pollJob(reference) {
   }
 }
 
-$('process-all').addEventListener('click', () => processStages(['ocr', 'translate', 'inpaint', 'render']));
+$('process-all').addEventListener('click', () => chatgptMode()?prepareChatGPT():processStages(['ocr', 'translate', 'inpaint', 'render']));
 $('process-ocr').addEventListener('click', () => processStages(['ocr']));
 $('process-translate').addEventListener('click', () => processStages(['translate']));
 $('process-render').addEventListener('click', () => processStages(isWordDocument(state.project)?['render']:['inpaint', 'render']));
@@ -655,7 +669,7 @@ function selectionChanged() {
   if(!batchFiles.length){const empty=document.createElement('small');empty.textContent=scope==='all'?'Ajoutez des fichiers à ce projet.':'Sélectionnez des fichiers dans la liste.';preview.append(empty);}
   for(const card of $('project-list').children)card.classList.toggle('selected',state.selected.has(card.dataset.projectId));
 }
-function batchStageModes(){return {all:['ocr','translate','inpaint','render'],ocr:['ocr'],translate:['translate'],render:['inpaint','render']};}
+function batchStageModes(){return {all:chatgptMode()?['ocr']:['ocr','translate','inpaint','render'],ocr:['ocr'],translate:['translate'],render:['inpaint','render']};}
 function sourceFormat(file){return String(file?.source_format||file?.provenance?.source_format||file?.export_extension||(/\.([a-z0-9]+)$/i.exec(file?.source_name||file?.provenance?.source_name||'')||[])[1]||'cbz').replace(/^\./,'').toLowerCase();}
 function isWordDocument(file){return sourceFormat(file)==='docx';}
 function fileExtension(file){const format=String(file?.export_extension||sourceFormat(file)).replace(/^\./,'').toLowerCase();return ({jpeg:'jpg',images:'cbz'})[format]||format;}
@@ -792,7 +806,7 @@ async function refreshBatches() {
     if(data.active_job)$('queue-single-message').textContent=`${data.active_job.title} · ${data.active_job.pages_done}/${data.active_job.total} pages · ${data.active_job.message}`;
     const active=data.batches.find(b=>b.id===data.active_id);
     $('queue-badge').hidden=!active;$('queue-badge').textContent=active?active.items.filter(i=>['pending','running'].includes(i.state)).length:0;
-    if(state.engineStatus)$('batch-models').textContent=`${state.engineStatus.translation?.name||'Traduction'} · ${state.engineStatus.inpainting?.name||'Nettoyage'}`;
+    if(state.engineStatus)$('batch-models').textContent=`${chatgptMode()?'ChatGPT · JSON':state.engineStatus.translation?.name||'Traduction'} · ${state.engineStatus.inpainting?.name||'Nettoyage'}`;
     selectionChanged();lockModels(state.processing||state.batchActive);
     lockEditor(state.processing);
     if(wasActive&&!state.batchActive) {
@@ -810,7 +824,7 @@ $('batch-form').addEventListener('submit',async event=>{
     if(!state.workspace)throw Error(tr('Choisissez un projet.'));
     if($('batch-scope').value==='selected'&&!state.selected.size)throw Error(tr('Sélectionnez au moins un fichier.'));
     const data=await postJson('/api/batches',{workspace_id:state.workspace.id,scope:$('batch-scope').value,project_ids:[...state.selected],stages:modes[$('batch-stages').value],
-      skip_existing:$('batch-skip').checked,auto_export:$('batch-export').checked,retranslate:$('batch-retranslate').checked,glossary:glossaryFrom($('batch-glossary').value)});
+      skip_existing:$('batch-skip').checked,auto_export:$('batch-export').checked&&(!chatgptMode()||$('batch-stages').value==='render'),retranslate:$('batch-retranslate').checked,glossary:glossaryFrom($('batch-glossary').value)});
     state.batchId=data.batch.id;state.batchActive=true;renderBatch(data.batch);flash('File lancée. Les fichiers seront traités successivement.');await navigate('batch');refreshBatches();
   }catch(error){flash(error.message);selectionChanged();}
 });
@@ -953,12 +967,14 @@ async function initializeWorkspace() {
 function applySettings() {
   state.settings ||= {ui_language:'fr',export:{format:'webp',quality:92}};
   $('ui-language').value=state.settings.ui_language||'fr';$('export-format').value=state.settings.export?.format||'webp';$('export-quality').value=state.settings.export?.quality||92;
+  $('translation-mode').value=state.settings.translation_mode||'local';
+  if(window.updateChatGPTMode)updateChatGPTMode();
   setUILanguage($('ui-language').value);fillLanguages();refreshLocalizedViews();
 }
 $('ui-language').addEventListener('change',()=>{setUILanguage($('ui-language').value);fillLanguages();refreshLocalizedViews();});
 $('settings-form').addEventListener('submit',async event=>{
   event.preventDefault();
-  try {const settings={ui_language:$('ui-language').value,export:{format:$('export-format').value,quality:Number($('export-quality').value)}};
+  try {const settings={ui_language:$('ui-language').value,translation_mode:$('translation-mode').value,export:{format:$('export-format').value,quality:Number($('export-quality').value)}};
     const data=await request('/api/settings',{method:'PUT',headers:{'Content-Type':'application/json','X-Renkavi-Client':'1'},body:JSON.stringify({settings})});state.settings=data.settings||settings;applySettings();$('settings-message').textContent=tr('Paramètres enregistrés.');
   }catch(error){$('settings-message').textContent=error.message;}
 });
@@ -1006,7 +1022,7 @@ function kindIcon(kind){return {ocr:'scan',translation:'language',inpainting:'br
 const downloadLabels={downloading:'Téléchargement',paused:'En pause',downloaded:'Prêt à installer',installing:'Installation',installed:'Installé',failed:'Échec',cancelled:'Annulé',queued:'En attente'};
 Object.assign(state,{hubModels:[],downloads:[],hubKind:'all',hubFetching:false,modelTab:'installed',system:null});
 function renderDashboard(){
-  const workspaces=state.workspaces||[],engines=state.engineStatus;
+  const workspaces=state.workspaces||[],engines=chatgptMode()?{...state.engineStatus,translation:{name:'ChatGPT · JSON',ready:true}}:state.engineStatus;
   $('dashboard-projects').textContent=workspaces.length;
   $('dashboard-chapters').textContent=workspaces.reduce((sum,w)=>sum+(w.chapter_count||0),0);
   $('dashboard-pages').textContent=`${workspaces.reduce((sum,w)=>sum+(w.page_count||0),0)} pages`;

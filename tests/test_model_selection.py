@@ -77,10 +77,25 @@ class ModelSelectionTests(unittest.TestCase):
                 local_llm.ensure_loaded(config)
             save.assert_called_once()
             self.assertEqual(config["base_url"], "http://127.0.0.1:22345")
-            commands = [call.args[0] for call in run.call_args_list]
+            commands = [call.args[0] for call in run.call_args_list if call.args[0][1:3]!=['server','status']]
             self.assertIn("22345", commands[0])
             self.assertIn("hy-mt2-1-8b", commands[1])
             self.assertNotIn("qwen", json.dumps(commands).lower())
+
+    def test_review_loader_reuses_live_port_and_respects_memory_budget(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            cli=Path(temporary)/'lms.exe';cli.touch()
+            config={'base_url':'http://127.0.0.1:6598','model':'renkavi-review','model_key':'qwen/qwen3.5-9b',
+                    'lms_cli':str(cli),'context_length':4096,'gpu_offload':.72}
+            with patch.object(local_llm,'CONFIG',Path(temporary)/'llm.json'),patch.object(local_llm,'loaded',side_effect=[False,True]),patch.object(local_llm.urllib.request,'urlopen',return_value=MagicMock()),patch.object(registry,'save_endpoint') as save,patch.object(local_llm.subprocess,'run',return_value=MagicMock(returncode=0,stdout='{"running":true,"port":1234}')) as run:
+                local_llm.ensure_loaded(config)
+            save.assert_called_once()
+            self.assertEqual(config['base_url'],'http://127.0.0.1:1234')
+            commands=[call.args[0] for call in run.call_args_list]
+            self.assertFalse(any(cmd[1:3]==['server','start'] for cmd in commands))
+            load=commands[-1]
+            self.assertEqual(load[load.index('--gpu')+1],'0.72')
+            self.assertEqual(load[load.index('-c')+1],'4096')
 
     def test_loader_error_names_the_selected_model(self):
         with tempfile.TemporaryDirectory() as temporary:

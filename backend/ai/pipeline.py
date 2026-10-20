@@ -29,7 +29,7 @@ def model_key(model):
 
 
 def processing_key(job,project,context_hash=None):
-    return digest({'version':3,'context_version':2,'models':{k:model_key(m) for k,m in job.get('models',{}).items()},
+    return digest({'version':4,'context_version':2,'models':{k:model_key(m) for k,m in job.get('models',{}).items()},
                    'project_context':context_hash if context_hash is not None else project_context(project)})
 
 
@@ -91,6 +91,8 @@ def output_file(store: ProjectStore, project_id: str, page_id: str, variant: str
         meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise FileNotFoundError("Lancez le nettoyage ou le rendu de cette page.") from exc
+    if variant=='rendered' and meta.get('review_pending'):
+        raise FileNotFoundError('La relecture contextuelle doit se terminer avant l’export.')
     if meta.get("signature") != signature(page) or variant not in meta.get("variants", []) or meta.get('project_context',context_hash)!=context_hash or (page.get('mask_strokes') and meta.get('mask_processing_version',0)<3):
         raise FileNotFoundError("Résultat périmé : relancez le traitement après vos corrections.")
     output = directory / f"{variant}.png"
@@ -177,7 +179,7 @@ class PipelineManager:
             page=selected[page_id]
             directory=page_directory(self.store,project['project_id'],page_id)
             meta=read_meta(directory)
-            if (meta.get('processing_key')!=key or meta.get('signature')!=signature(page)
+            if (meta.get('review_pending') or meta.get('processing_key')!=key or meta.get('signature')!=signature(page)
                     or meta.get('project_context')!=context_hash or 'rendered' not in meta.get('variants',[])
                     or (page.get('mask_strokes') and meta.get('mask_processing_version',0)<3)
                     or any(stale_machine_draft(r,context_hash) or stale_model_draft(r,job.get('models',{}).get('translation',{})) for r in page['regions'])
@@ -202,6 +204,9 @@ class PipelineManager:
             stages = data.get("stages", list(STAGES))
             if not isinstance(stages, list) or not stages or len(set(stages)) != len(stages) or any(s not in STAGES for s in stages):
                 raise ValueError("Étapes de traitement invalides.")
+            from backend.settings import Settings
+            if 'translate' in stages and Settings(self.store.data_dir).get().get('translation_mode')=='chatgpt':
+                raise ValueError('Mode ChatGPT : préparez l’OCR, exportez le JSON puis importez les traductions. Aucun traducteur local ne sera chargé.')
             selected = data.get("page_ids", [p["id"] for p in project["pages"]])
             if not isinstance(selected, list) or not selected or len(set(selected)) != len(selected) or any(p not in [x["id"] for x in project["pages"]] for p in selected):
                 raise ValueError("Sélection de pages invalide.")
@@ -227,6 +232,16 @@ class PipelineManager:
                 if job['models']['translation']['adapter'] in {'lmstudio','openai_compatible'}:
                     job['models']['translation']['config']['glossary']=copy.deepcopy(glossary)
                     job['models']['translation']['config']['document_context']=project.get('translation_context','')
+                primary=job['models']['translation']
+                if ('translate' in stages and project['source_language'] in {'en','auto'} and project['target_language']=='fr'
+                        and primary.get('adapter')=='lmstudio' and primary.get('config',{}).get('profile')=='translategemma'
+                        and primary['config'].get('model','').startswith('renkavi-') and 'review' not in job['models']):
+                    from backend.ai.registry import read_catalog,is_available
+                    reviewer=next((m for m in read_catalog()['models'] if m.get('adapter')=='lmstudio'
+                                   and m.get('config',{}).get('model_key','').lower()=='qwen/qwen3.5-9b' and is_available(m)),None)
+                    if reviewer:
+                        job['models']['review']=copy.deepcopy(reviewer)
+                        job['models']['review']['config'].update(model='renkavi-context-review',context_length=4096,gpu_offload=.72)
             self._jobs[job["id"]] = job
             self._active = job["id"]
             self._events[job['id']]=threading.Event()
@@ -296,7 +311,7 @@ class PipelineManager:
                 directory=page_directory(self.store,project['project_id'],page_id)
                 meta=read_meta(directory)
                 context_hash=project_context(project)
-                if job['skip_existing'] and not job['retranslate'] and job['stages']==list(STAGES) and not any(stale_machine_draft(r,context_hash) or stale_model_draft(r,job.get('models',{}).get('translation',{})) for r in page['regions']) and meta.get('processing_key')==processing_key(job,project):
+                if job['skip_existing'] and not job['retranslate'] and job['stages']==list(STAGES) and not meta.get('review_pending') and not any(stale_machine_draft(r,context_hash) or stale_model_draft(r,job.get('models',{}).get('translation',{})) for r in page['regions']) and meta.get('processing_key')==processing_key(job,project):
                     try:output_file(self.store,project['project_id'],page_id,'rendered')
                     except FileNotFoundError:pass
                     else:
@@ -319,6 +334,7 @@ class PipelineManager:
                     if stage == "ocr":
                         if not structured and not page["regions"] and page_id not in ocr_prepared:
                             page["regions"] = self.engines.detect(image, progress, project["source_language"])
+                            page['ocr_completed']={'sha256':page['sha256'],'language':project['source_language']}
                             project = self.store.save(project, project["revision"])
                             page = next(p for p in project["pages"] if p["id"] == page_id)
                         else:
@@ -342,6 +358,7 @@ class PipelineManager:
                                     region['target_text']=''
                                     region.pop('preserve_original',None)
                                     region.pop('translation_warnings',None)
+                                    region.pop('translation_review',None)
                                     upgraded+=int(outdated)
                                     upgraded_model+=int(model_changed)
                         metric['translation']['upgraded_context']=upgraded
@@ -420,12 +437,17 @@ class PipelineManager:
                             atomic_json(directory / "meta.json", {"signature": signature(page), "variants": variants, "models": job.get("models", {}),
                                 'project_context':project_context(project),
                                 'mask_processing_version':3,
+                                'review_pending':bool(job.get('models',{}).get('review')),
                                 'processing_key':processing_key(job,project),'cleaning_signature':cleaning_signature(page,job),'cleaning':counts,
                                 'warnings':[w for w in warnings if w.startswith(page['name']+' :')],"created_at": utc_now()})
                     metric["timings"][stage] = round(time.perf_counter()-start, 3)
                 self._update(job, pages_done=index+1, regions=job["regions"]+len(page["regions"]), warnings=list(dict.fromkeys(warnings)),
                              metrics=job["metrics"]+[metric])
+            if job.get('models',{}).get('review'):
+                self._review_translations(job)
             self._update(job, state="completed", message="Traitement terminé", seconds=round(time.perf_counter()-started, 2))
+        except InterruptedError as exc:
+            self._update(job,state='paused',message=str(exc),seconds=round(time.perf_counter()-started,2))
         except Exception as exc:
             self._update(job, state="failed", message=str(exc), error=f"{type(exc).__name__}: {exc}", seconds=round(time.perf_counter()-started, 2))
         finally:
@@ -437,3 +459,57 @@ class PipelineManager:
             with self._lock:
                 self._active = None
                 self._events[job['id']].set()
+
+    def _review_translations(self,job):
+        """Review once per document, then refresh lettering using cached cleaning."""
+        from backend.ai.context_review import review_project
+        from backend.ai.local_llm import ensure_loaded,release_loaded
+        from backend.ai.engines import render_translation
+        import gc
+        project=self.store.load(job['project_id'])
+        baseline=copy.deepcopy(project)
+        config=copy.deepcopy(job['models']['review']['config'])
+        primary=job['models']['translation']['config']
+        # Reuse the endpoint resolved by the first translation pass.
+        config['base_url']=primary['base_url']
+        self._update(job,stage='translate',message='Préparation de la relecture contextuelle · Qwen3.5 9B')
+        if self.engines is not None:
+            self.engines.close();self.engines=None
+        gc.collect()
+        release_loaded(primary)
+        started=time.perf_counter()
+        try:
+            ensure_loaded(config)
+            summary=review_project(project,job['page_ids'],config,
+                progress=lambda message:self._update(job,message=message),should_stop=lambda:bool(job.get('stop_requested')))
+        finally:
+            release_loaded(config)
+        summary['seconds']=round(time.perf_counter()-started,3)
+        # Never merge inference over concurrent manual edits.
+        with self.store._lock:
+            current=self.store.load(job['project_id'])
+            if current['revision']!=baseline['revision']:
+                raise RevisionConflict('Document modifié pendant la relecture. Relancez le traitement.')
+            project=self.store.save(project,project['revision'])
+        for page in project['pages']:
+            if page['id'] not in job['page_ids']:continue
+            directory=page_directory(self.store,job['project_id'],page['id'])
+            meta=read_meta(directory)
+            old=next(p for p in baseline['pages'] if p['id']==page['id'])
+            # Translate-only jobs must leave prior renders invalidated.
+            if 'render' not in job['stages']:continue
+            if meta.get('signature')!=signature(old) or not (directory/'cleaned.png').is_file():
+                raise RevisionConflict('Le rendu a changé pendant la relecture. Relancez le rendu.')
+            if [r['target_text'] for r in old['regions']]!=[r['target_text'] for r in page['regions']]:
+                with Image.open(directory/'cleaned.png') as image:
+                    rendered,warnings=render_translation(image.convert('RGB'),page['regions'])
+                try:_atomic_image(directory/'rendered.png',rendered,compress_level=2)
+                finally:rendered.close()
+                meta['warnings']=[w for w in meta.get('warnings',[]) if 'Glossaire à vérifier :' not in w]
+                meta['warnings'].extend(f"{page['name']} : {w}" for w in warnings)
+            meta.update(signature=signature(page),review_pending=False,review=summary,processing_key=processing_key(job,project))
+            atomic_json(directory/'meta.json',meta)
+        unresolved=[f"{p['name']} : {w}" for p in project['pages'] if p['id'] in job['page_ids']
+                    for r in p['regions'] for w in r.get('translation_warnings',[])]
+        warnings=[w for w in job['warnings'] if 'Glossaire à vérifier :' not in w]
+        self._update(job,review=summary,warnings=list(dict.fromkeys(warnings+unresolved)))

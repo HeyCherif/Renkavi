@@ -7,6 +7,31 @@ def regions(texts):
     return [{'id':f'row{i}','source_text':text,'target_text':'','status':'detected'} for i,text in enumerate(texts)]
 
 class DialogueContextTests(unittest.TestCase):
+    def test_gemma_receives_relevant_glossary_on_every_recovery_request(self):
+        rows=regions(['He is the chosen one.','Kanata is here.'])
+        config={'profile':'translategemma','model':'fake','model_key':'test',
+                'glossary':{'chosen one':'Élu','Kanata':'Kanata','unrelated term':'ABSENT_TERM'}}
+        replies=['invalid','invalid','Il est l’Élu.','Kanata est ici.']
+        with patch('backend.ai.local_llm.ensure_loaded'),patch('backend.ai.local_llm.complete',side_effect=replies) as complete:
+            translate(rows,'en','fr',config,reference_regions=rows)
+        self.assertEqual(complete.call_count,4)
+        for call in complete.call_args_list:
+            prompt=call.args[1]
+            self.assertNotIn('ABSENT_TERM',prompt)
+        for call in complete.call_args_list[:3]:
+            self.assertIn('"chosen one": "Élu"',call.args[1])
+        self.assertIn('"Kanata": "Kanata"',complete.call_args_list[3].args[1])
+
+    def test_generic_profile_normalizes_ocr_and_receives_glossary(self):
+        rows=regions(['1 WAS THE CHOSEN ONE.'])
+        config={'model':'fake','model_key':'test','glossary':{'chosen one':'Élu'}}
+        with patch('backend.ai.local_llm.ensure_loaded'),patch('backend.ai.local_llm.chat',return_value='[{"id":"row0","text":"J’étais l’Élu."}]') as chat:
+            translate(rows,'en','fr',config,reference_regions=rows)
+        payload=chat.call_args.args[1]
+        self.assertIn('I was the chosen one.',payload['input'])
+        self.assertIn('Élu',payload['system_prompt'])
+        self.assertEqual(rows[0]['source_text'],'1 WAS THE CHOSEN ONE.')
+
     def test_saved_document_notes_are_sent_to_the_model(self):
         rows=regions(['He is the chosen one.'])
         config={'profile':'translategemma','model':'fake','model_key':'test','base_url':'http://127.0.0.1:1000','document_context':'The narrator is a son; Sumire is his sister.'}
